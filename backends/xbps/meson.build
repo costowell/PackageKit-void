@@ -1,3 +1,5 @@
+xbps_dep = dependency('libxbps', version: '>=0.59.0')
+
 shared_module(
   'pk_backend_xbps',
   'pk-backend-xbps.c',
@@ -5,6 +7,7 @@ shared_module(
   dependencies: [
     packagekit_glib2_dep,
     gmodule_dep,
+    xbps_dep
   ],
   c_args: [
     '-DG_LOG_DOMAIN="PackageKit-XBPS"',
