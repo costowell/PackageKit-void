@@ -19,7 +19,6 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
-#include "pk-backend-job.h"
 #include <gmodule.h>
 #include <glib.h>
 #include <pk-backend.h>
@@ -58,8 +57,6 @@ int add_pkgs_from_repo(struct xbps_repo *repo, void *arg, bool *done)
   if (repo->idx == NULL)
     return 0;
 
-  int length = xbps_dictionary_count(repo->idx);
-  unsigned int count = 0;
   iter = xbps_dictionary_iterator(repo->idx);
   while ((obj = xbps_object_iterator_next(iter)) != NULL) {
 
@@ -80,18 +77,100 @@ int add_pkgs_from_repo(struct xbps_repo *repo, void *arg, bool *done)
 
     pk_backend_job_package(job, pk_state, pkg_id, short_desc);
 
-    pk_backend_job_set_percentage(job, (++count/length) * 100);
   }
 
   return 0;
 }
 
+static void
+pk_backend_resolve_thread (PkBackendJob *job, GVariant *params, gpointer user_data)
+{
+	guint i;
+	guint len;
+	PkBitfield filters;
+	g_autofree gchar **search = NULL;
+  xbps_dictionary_t pkg;
+  const char *pkgver, *arch, *short_desc, *version, *repository;
+  char *pkg_id = malloc(200 * sizeof(char));
+  char *pkg_name = malloc(50 * sizeof(char));
+
+	g_variant_get (params, "(t^a&s)",
+		       &filters,
+		       &search);
+
+	pk_backend_job_set_status (job, PK_STATUS_ENUM_QUERY);
+	pk_backend_job_set_percentage (job, 0);
+
+	/* each one has a different detail for testing */
+	len = g_strv_length (search);
+	for (i = 0; i < len; i++) {
+    if((pkg = xbps_pkgdb_get_pkg(&priv->handle, search[i])) == NULL) {
+      pk_backend_job_error_code(job, PK_ERROR_ENUM_PACKAGE_NOT_FOUND, "package '%s' not found", search[i]);
+      continue;
+    }
+
+    xbps_dictionary_get_cstring_nocopy(pkg, "pkgver", &pkgver);
+    xbps_dictionary_get_cstring_nocopy(pkg, "repository", &repository);
+    xbps_dictionary_get_cstring_nocopy(pkg, "architecture", &arch);
+    xbps_dictionary_get_cstring_nocopy(pkg, "short_desc", &short_desc);
+    xbps_pkg_name(pkg_name, 50, pkgver);
+    version = xbps_pkg_version(pkgver);
+
+    snprintf(pkg_id, 200, "%s;%s;%s;%s", pkg_name, version, arch, repository);
+
+    pk_backend_job_package(job, PK_INFO_ENUM_INSTALLED, pkg_id, short_desc);
+
+    pk_backend_job_set_percentage(job, (i/len) * 100);
+	}
+	pk_backend_job_set_percentage (job, 100);
+  // pk_backend_job_finished(job);
+}
+
 void
-pk_backend_get_packages(PkBackend *backend, PkBackendJob *job, PkBitfield filters) {
+pk_backend_resolve (PkBackend *backend, PkBackendJob *job, PkBitfield filters, gchar **packages)
+{
+	pk_backend_job_thread_create (job, pk_backend_resolve_thread, NULL, NULL);
+}
+
+void
+pk_backend_get_details(PkBackend *backend, PkBackendJob *job, gchar **package_ids)
+{
+  guint i, len;
+  gchar **package;
+  xbps_dictionary_t pkg;
+  const char *short_desc, *license, *url;
+  gulong size;
+
+  pk_backend_job_set_status(job, PK_STATUS_ENUM_QUERY);
+  pk_backend_job_set_percentage(job, 0);
+
+  len = g_strv_length(package_ids);
+  for (i = 0; i < len; i++) {
+    package = pk_package_id_split(package_ids[i]);
+    // if (g_strcmp0(package[PK_PACKAGE_ID_DATA], "installed") == 0) { // TODO: potentially useful later on
+    pkg = xbps_pkgdb_get_pkg(&priv->handle, package[PK_PACKAGE_ID_NAME]);
+    xbps_dictionary_get_cstring_nocopy(pkg, "short_desc", &short_desc);
+    xbps_dictionary_get_cstring_nocopy(pkg, "license", &license);
+    xbps_dictionary_get_cstring_nocopy(pkg, "homepage", &url);
+    xbps_dictionary_get_uint64(pkg, "filename-size", &size);
+    pk_backend_job_details(job, package_ids[i], short_desc, license, PK_GROUP_ENUM_SYSTEM, short_desc, url, size);
+  }
+	pk_backend_job_set_percentage (job, 100);
+  pk_backend_job_finished(job);
+}
+
+static void
+pk_backend_get_packages_thread(PkBackendJob *job, GVariant *params, gpointer user_data)
+{
   pk_backend_job_set_status(job, PK_STATUS_ENUM_QUERY);
   pk_backend_job_set_allow_cancel(job, TRUE);
   xbps_rpool_foreach(&priv->handle, add_pkgs_from_repo, job);
   pk_backend_job_finished(job);
+}
+
+void
+pk_backend_get_packages(PkBackend *backend, PkBackendJob *job, PkBitfield filters) {
+  pk_backend_job_thread_create(job, pk_backend_get_packages_thread, NULL, NULL);
 }
   
 const gchar *
@@ -137,6 +216,9 @@ pk_backend_get_updates(PkBackend *backend, PkBackendJob *job, PkBitfield filters
   const char *pkgver, *arch, *short_desc, *version, *repository;
   char *pkg_id = malloc(200 * sizeof(char));
   char *pkg_name = malloc(50 * sizeof(char));
+
+  pk_backend_job_set_status(job, PK_STATUS_ENUM_QUERY);
+  pk_backend_job_set_percentage(job, 0);
   
   if ((rv = xbps_transaction_update_packages(&priv->handle)) != 0) {
     if (rv == ENOENT) {
@@ -200,6 +282,7 @@ pk_backend_get_updates(PkBackend *backend, PkBackendJob *job, PkBitfield filters
     pk_backend_job_package(job, pk_state, pkg_id, short_desc);
   }
 
+  pk_backend_job_set_percentage(job, 100);
   pk_backend_job_finished(job);
 
 }
